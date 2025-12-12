@@ -1,0 +1,78 @@
+name: Build ImmortalWrt 24.10.4 (x86/64)
+
+on:
+  workflow_dispatch: # 允许手动点击按钮触发
+
+env:
+  # 固件版本和下载地址
+  IB_URL: "https://downloads.immortalwrt.org/releases/24.10.4/targets/x86/64/immortalwrt-imagebuilder-24.10.4-x86-64.Linux-x86_64.tar.xz"
+  
+  #在此处定义你的软件包列表 (已自动补全 OpenClash 依赖)
+  # 注意：我将 luci-light 替换为了 luci，因为 OpenClash 需要完整的 web 环境
+  PACKAGES: >
+    autocore automount base-files block-mount ca-bundle default-settings-chn 
+    dnsmasq-full dropbear fdisk firewall4 fstools grub2-bios-setup 
+    i915-firmware-dmc kmod-button-hotplug kmod-e1000 kmod-e1000e 
+    kmod-dwmac-intel kmod-i40e kmod-igb kmod-igbvf kmod-igc kmod-ixgbe 
+    kmod-ixgbevf kmod-fs-f2fs kmod-fs-vfat kmod-nf-nathelper 
+    kmod-nf-nathelper-extra kmod-nft-offload kmod-usb-hid kmod-drm-i915 
+    libc libgcc libustream-openssl logd luci-app-package-manager luci-compat 
+    luci-lib-base luci-lib-ipkg luci mkf2fs mtd netifd nftables odhcp6c 
+    odhcpd-ipv6only opkg partx-utils ppp ppp-mod-pppoe procd-ujail uci 
+    uclient-fetch urandom-seed urngd 
+    luci-app-openclash luci-i18n-openclash-zh-cn 
+    kmod-tun ip-full libcap libcap-bin ruby ruby-yaml coreutils-nohup bash curl wget-ssl gzip unzip
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Download and Extract Image Builder
+      run: |
+        echo "Downloading Image Builder..."
+        wget -O builder.tar.xz $IB_URL
+        mkdir -p builder
+        tar -xvf builder.tar.xz -C builder --strip-components=1
+        
+    - name: Configure IP to 10.0.0.1 (Pre-boot Script)
+      run: |
+        cd builder
+        # 创建 uci-defaults 目录
+        mkdir -p files/etc/uci-defaults
+        
+        # 写入修改 IP 的脚本
+        cat << 'EOF' > files/etc/uci-defaults/99-custom-settings
+        #!/bin/sh
+        # 修改 LAN口 IP
+        uci set network.lan.ipaddr='10.0.0.1'
+        uci commit network
+        
+        # 强制设置时区为上海 (可选优化)
+        uci set system.@system[0].timezone='CST-8'
+        uci set system.@system[0].zonename='Asia/Shanghai'
+        uci commit system
+        
+        exit 0
+        EOF
+        
+        # 赋予脚本执行权限
+        chmod +x files/etc/uci-defaults/99-custom-settings
+        echo "IP modification script created."
+
+    - name: Build Firmware
+      run: |
+        cd builder
+        # 开始打包
+        # FILES="files" 表示将我们刚才建立的修改IP脚本打入固件
+        # PACKAGES="..." 包含所有软件
+        make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="files"
+
+    - name: Upload Firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: ImmortalWrt-24.10.4-x86-64
+        path: builder/bin/targets/x86/64/*
