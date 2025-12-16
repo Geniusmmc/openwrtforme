@@ -1,10 +1,10 @@
-name: ⚡️ 全能版 Image Builder (自动适配 zst/xz)
+name: ⚡️ 修复版 Image Builder (自动适配 zst/xz)
 
 on:
   workflow_dispatch:
     inputs:
       force_version:
-        description: '填入版本号 (例如 24.10.4)。留空则自动获取 GitHub 最新稳定版'
+        description: '可选: 手动填入版本号 (如 24.10.0-rc3)。留空则自动获取最新稳定版'
         required: false
         default: ''
 
@@ -22,7 +22,6 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        # 必须安装 zstd 以解压新版固件
         sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip python3 zstd
 
     - name: Detect Version & Download
@@ -38,14 +37,12 @@ jobs:
           echo "🔎 自动检测到 GitHub 最新发布版: $VERSION"
         fi
 
-        # 2. 构造基础 URL (x86/64)
+        # 2. 构造下载链接
         BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/x86/64"
-        
-        # 3. 尝试下载逻辑 (优先尝试 .zst，失败则尝试 .xz)
         FILE_ZST="immortalwrt-imagebuilder-${VERSION}-x86-64.Linux-x86_64.tar.zst"
         FILE_XZ="immortalwrt-imagebuilder-${VERSION}-x86-64.Linux-x86_64.tar.xz"
         
-        echo "⬇️ 尝试下载新版格式 (.zst)..."
+        echo "⬇️ 准备下载 Image Builder..."
         if wget -O ib.archive "$BASE_URL/$FILE_ZST"; then
           echo "✅ 下载成功 (.zst)"
           EXT="zst"
@@ -60,7 +57,7 @@ jobs:
           fi
         fi
 
-        # 4. 解压
+        # 3. 解压
         mkdir -p openwrt
         if [ "$EXT" == "zst" ]; then
           tar -I zstd -xf ib.archive -C openwrt --strip-components=1
@@ -74,23 +71,34 @@ jobs:
         mkdir -p packages/custom
         cd packages/custom
         
-        # 下载 OpenClash IPK (最新 Beta)
+        # 下载 OpenClash IPK
         wget https://github.com/vernesong/OpenClash/releases/download/v0.46.003-beta/luci-app-openclash_0.46.003-beta_all.ipk
         
         cd ../..
-        # 允许安装本地包
         sed -i 's/option check_signature/# option check_signature/g' repositories.conf
 
     - name: Configure IP & Packages
       run: |
         cd openwrt
         
-        # --- 1. 修改 IP 为 10.0.0.1 ---
-        sed -i 's/192.168.[0-9]*.[0-9]*/10.0.0.1/g' package/base-files/files/bin/config_generate
+        # --- 修复核心：使用 uci-defaults 修改 IP ---
+        # Image Builder 不能直接编辑 config_generate，我们创建一个启动脚本
+        # 路由器第一次开机时会自动执行这个脚本修改 IP
         
-        # --- 2. 软件包配置 ---
-        # 包含: i915(核显), igc(2.5G网卡), OpenClash
-        # 排除: 旧网卡驱动, dnsmasq(防止冲突)
+        mkdir -p files/etc/uci-defaults
+        
+        cat << EOF > files/etc/uci-defaults/99-custom-ip
+        uci set network.lan.ipaddr='10.0.0.1'
+        uci commit network
+        exit 0
+        EOF
+        
+        # 赋予脚本执行权限
+        chmod +x files/etc/uci-defaults/99-custom-ip
+
+        # --- 软件包配置 ---
+        # 包含: i915, igc, OpenClash
+        # 排除: 旧驱动
         
         PACKAGES="base-files block-mount ca-bundle default-settings-chn dnsmasq-full dropbear fdisk firewall4 fstools grub2-bios-setup \
         kmod-button-hotplug kmod-fs-f2fs kmod-igbvf kmod-igc kmod-ixgbevf kmod-nf-nathelper kmod-nf-nathelper-extra kmod-nft-offload kmod-usb-hid kmod-usb-net \
@@ -99,7 +107,8 @@ jobs:
         luci-app-openclash \
         -kmod-e1000e -kmod-e1000 -kmod-igb -kmod-i40e -kmod-ixgbe -dnsmasq"
 
-        # --- 3. 生成固件 ---
+        # --- 生成固件 ---
+        # 关键参数: FILES="files" 用于将我们需要修改 IP 的脚本植入固件
         make image PROFILE="generic" PACKAGES="$PACKAGES" PACKAGES_DIR="packages/custom" FILES="files"
 
     - name: Organize files
@@ -111,6 +120,6 @@ jobs:
     - name: Upload firmware
       uses: actions/upload-artifact@v4
       with:
-        name: ImmortalWrt_Universal_x86_64
+        name: ImmortalWrt_Fix_x86_64
         path: ${{ env.FIRMWARE }}
         compression-level: 0
