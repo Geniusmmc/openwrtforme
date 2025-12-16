@@ -1,78 +1,129 @@
-name: Build ImmortalWrt 24.10.4 (x86/64)
+name: Build ImmortalWrt
 
 on:
-  workflow_dispatch: # 允许手动点击按钮触发
+  workflow_dispatch:
 
 env:
-  # 固件版本和下载地址
-  IB_URL: "https://downloads.immortalwrt.org/releases/24.10.4/targets/x86/64/immortalwrt-imagebuilder-24.10.4-x86-64.Linux-x86_64.tar.xz"
-  
-  #在此处定义你的软件包列表 (已自动补全 OpenClash 依赖)
-  # 注意：我将 luci-light 替换为了 luci，因为 OpenClash 需要完整的 web 环境
-  PACKAGES: >
-    autocore automount base-files block-mount ca-bundle default-settings-chn 
-    dnsmasq-full dropbear fdisk firewall4 fstools grub2-bios-setup 
-    i915-firmware-dmc kmod-button-hotplug kmod-e1000 kmod-e1000e 
-    kmod-dwmac-intel kmod-i40e kmod-igb kmod-igbvf kmod-igc kmod-ixgbe 
-    kmod-ixgbevf kmod-fs-f2fs kmod-fs-vfat kmod-nf-nathelper 
-    kmod-nf-nathelper-extra kmod-nft-offload kmod-usb-hid kmod-drm-i915 
-    libc libgcc libustream-openssl logd luci-app-package-manager luci-compat 
-    luci-lib-base luci-lib-ipkg luci mkf2fs mtd netifd nftables odhcp6c 
-    odhcpd-ipv6only opkg partx-utils ppp ppp-mod-pppoe procd-ujail uci 
-    uclient-fetch urandom-seed urngd 
-    luci-app-openclash luci-i18n-openclash-zh-cn 
-    kmod-tun ip-full libcap libcap-bin ruby ruby-yaml coreutils-nohup bash curl wget-ssl gzip unzip
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-23.05
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    
+
     steps:
     - name: Checkout
       uses: actions/checkout@v3
 
-    - name: Download and Extract Image Builder
+    # --- 新增步骤：最大化磁盘空间 ---
+    - name: Free Disk Space (Maximize)
       run: |
-        echo "Downloading Image Builder..."
-        wget -O builder.tar.xz $IB_URL
-        mkdir -p builder
-        tar -xvf builder.tar.xz -C builder --strip-components=1
+        echo "Freeing up disk space..."
+        # 删除预装的大型软件和库
+        sudo -E apt-get -qq remove --purge azure-cli google-cloud-sdk dotnet* firefox google-chrome-stable powershell mono-devel
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
         
-    - name: Configure IP to 10.0.0.1 (Pre-boot Script)
-      run: |
-        cd builder
-        # 创建 uci-defaults 目录
-        mkdir -p files/etc/uci-defaults
+        # 删除大目录
+        sudo rm -rf /etc/apt/sources.list.d/*
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/share/swift
         
-        # 写入修改 IP 的脚本
-        cat << 'EOF' > files/etc/uci-defaults/99-custom-settings
-        #!/bin/sh
-        # 修改 LAN口 IP
-        uci set network.lan.ipaddr='10.0.0.1'
-        uci commit network
+        # 清理 Docker 镜像 (如果不需要 Docker)
+        docker rmi $(docker images -q) 2>/dev/null
         
-        # 强制设置时区为上海 (可选优化)
-        uci set system.@system[0].timezone='CST-8'
-        uci set system.@system[0].zonename='Asia/Shanghai'
-        uci commit system
-        
-        exit 0
-        EOF
-        
-        # 赋予脚本执行权限
-        chmod +x files/etc/uci-defaults/99-custom-settings
-        echo "IP modification script created."
+        # 显示当前磁盘空间
+        df -hT
 
-    - name: Build Firmware
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
       run: |
-        cd builder
-        # 开始打包
-        # FILES="files" 表示将我们刚才建立的修改IP脚本打入固件
-        # PACKAGES="..." 包含所有软件
-        make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="files"
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2204)
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$USER /workdir
 
-    - name: Upload Firmware
-      uses: actions/upload-artifact@v4
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Add OpenClash & Update Feeds
+      run: |
+        cd openwrt
+        echo "src-git openclash https://github.com/vernesong/OpenClash.git" >> feeds.conf.default
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Configure Firmware (IP & Packages)
+      run: |
+        cd openwrt
+        
+        # --- 1. 修改默认 IP 为 10.0.0.1 ---
+        sed -i 's/192.168.[0-9]*.[0-9]*/10.0.0.1/g' package/base-files/files/bin/config_generate
+        
+        # --- 2. 生成基础配置 (x86_64) ---
+        echo "CONFIG_TARGET_x86=y" > .config
+        echo "CONFIG_TARGET_x86_64=y" >> .config
+        echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
+        
+        # --- 3. 写入指定软件包 ---
+        PACKAGES="autocore automount base-files block-mount ca-bundle default-settings-chn dnsmasq-full dropbear fdisk firewall4 fstools grub2-bios-setup i915-firmware-dmc kmod-button-hotplug kmod-fs-f2fs kmod-igbvf kmod-igc kmod-ixgbevf kmod-nf-nathelper kmod-nf-nathelper-extra kmod-nft-offload kmod-usb-hid kmod-usb-net libc libgcc libustream-openssl logd luci-app-package-manager luci-compat luci-lib-base luci-lib-ipkg luci-light mkf2fs mtd netifd nftables odhcp6c odhcpd-ipv6only opkg partx-utils ppp ppp-mod-pppoe procd-ujail uci uclient-fetch urandom-seed urngd kmod-dwmac-intel kmod-fs-vfat kmod-drm-i915 luci-app-openclash"
+        
+        for pkg in $PACKAGES; do
+            echo "CONFIG_PACKAGE_$pkg=y" >> .config
+        done
+
+        # --- 4. 显式禁用不需要的驱动 ---
+        echo "# CONFIG_PACKAGE_kmod-e1000e is not set" >> .config
+        echo "# CONFIG_PACKAGE_kmod-e1000 is not set" >> .config
+        echo "# CONFIG_PACKAGE_kmod-igb is not set" >> .config
+        echo "# CONFIG_PACKAGE_kmod-i40e is not set" >> .config
+        echo "# CONFIG_PACKAGE_kmod-ixgbe is not set" >> .config
+        
+        # --- 5. 解决冲突 ---
+        echo "# CONFIG_PACKAGE_dnsmasq is not set" >> .config
+        
+        make defconfig
+
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Organize files
+      id: organize
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@v3
+      if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: ImmortalWrt-24.10.4-x86-64
-        path: builder/bin/targets/x86/64/*
+        name: OpenWrt_firmware
+        path: ${{ env.FIRMWARE }}
