@@ -18,28 +18,17 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4  # 已升级到 v4
 
-    # --- 新增步骤：最大化磁盘空间 ---
+    # --- 步骤：最大化磁盘空间 ---
     - name: Free Disk Space (Maximize)
       run: |
         echo "Freeing up disk space..."
-        # 删除预装的大型软件和库
         sudo -E apt-get -qq remove --purge azure-cli google-cloud-sdk dotnet* firefox google-chrome-stable powershell mono-devel
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
-        
-        # 删除大目录
-        sudo rm -rf /etc/apt/sources.list.d/*
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /usr/local/lib/android
-        sudo rm -rf /opt/ghc
-        sudo rm -rf /usr/share/swift
-        
-        # 清理 Docker 镜像 (如果不需要 Docker)
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/share/swift
         docker rmi $(docker images -q) 2>/dev/null
-        
-        # 显示当前磁盘空间
         df -hT
 
     - name: Initialization environment
@@ -122,8 +111,9 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4  # 已升级到 v4 (关键修复)
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware
         path: ${{ env.FIRMWARE }}
+        compression-level: 0 # v4 新特性：设置为0可以加快上传速度（因为固件本身已经是压缩包）
