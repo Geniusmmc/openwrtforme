@@ -1,4 +1,4 @@
-name: 🟢 最终完美修复版 (Image Builder)
+name: 🧹 纯净版 Image Builder (仅 EFI 镜像)
 
 on:
   workflow_dispatch:
@@ -22,8 +22,9 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        # 核心修复: 添加 qemu-utils 解决 qcow2 生成失败的问题
-        sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip python3 zstd qemu-utils
+        # 即使我们只需要 img.gz，Image Builder 编译过程仍会尝试打包 ISO/QCOW2
+        # 所以必须安装这些工具防止编译中途报错 (Error 127)
+        sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip python3 zstd qemu-utils genisoimage xorriso
 
     - name: Detect Version & Download
       run: |
@@ -32,33 +33,25 @@ jobs:
           VERSION="${{ github.event.inputs.force_version }}"
           echo "👉 使用手动指定的版本: $VERSION"
         else
-          # 获取最新 Release Tag
           LATEST_TAG=$(curl -sL https://api.github.com/repos/immortalwrt/immortalwrt/releases/latest | grep "tag_name" | cut -d '"' -f 4)
           VERSION=${LATEST_TAG#v}
           echo "🔎 自动检测到 GitHub 最新发布版: $VERSION"
         fi
 
-        # 2. 构造下载链接
+        # 2. 下载并解压
         BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/x86/64"
         FILE_ZST="immortalwrt-imagebuilder-${VERSION}-x86-64.Linux-x86_64.tar.zst"
         FILE_XZ="immortalwrt-imagebuilder-${VERSION}-x86-64.Linux-x86_64.tar.xz"
         
-        echo "⬇️ 准备下载 Image Builder..."
         if wget -O ib.archive "$BASE_URL/$FILE_ZST"; then
-          echo "✅ 下载成功 (.zst)"
           EXT="zst"
+        elif wget -O ib.archive "$BASE_URL/$FILE_XZ"; then
+          EXT="xz"
         else
-          echo "⚠️ .zst 下载失败，尝试旧版格式 (.xz)..."
-          if wget -O ib.archive "$BASE_URL/$FILE_XZ"; then
-            echo "✅ 下载成功 (.xz)"
-            EXT="xz"
-          else
-            echo "❌ 下载失败！请检查版本号 [$VERSION] 是否存在。"
-            exit 1
-          fi
+          echo "❌ 下载失败！"
+          exit 1
         fi
 
-        # 3. 解压
         mkdir -p openwrt
         if [ "$EXT" == "zst" ]; then
           tar -I zstd -xf ib.archive -C openwrt --strip-components=1
@@ -71,10 +64,7 @@ jobs:
         cd openwrt
         mkdir -p packages/custom
         cd packages/custom
-        
-        # 下载 OpenClash IPK
         wget https://github.com/vernesong/OpenClash/releases/download/v0.46.003-beta/luci-app-openclash_0.46.003-beta_all.ipk
-        
         cd ../..
         sed -i 's/option check_signature/# option check_signature/g' repositories.conf
 
@@ -82,7 +72,7 @@ jobs:
       run: |
         cd openwrt
         
-        # --- 核心: 使用 uci-defaults 修改 IP (解决 sed 报错) ---
+        # --- 1. 使用 uci-defaults 修改 IP (10.0.0.1) ---
         mkdir -p files/etc/uci-defaults
         cat << EOF > files/etc/uci-defaults/99-custom-ip
         uci set network.lan.ipaddr='10.0.0.1'
@@ -91,10 +81,7 @@ jobs:
         EOF
         chmod +x files/etc/uci-defaults/99-custom-ip
 
-        # --- 软件包配置 ---
-        # 包含: i915, igc, OpenClash
-        # 排除: 旧驱动
-        
+        # --- 2. 软件包配置 (核显 + 2.5G网卡 + OpenClash - 旧驱动) ---
         PACKAGES="base-files block-mount ca-bundle default-settings-chn dnsmasq-full dropbear fdisk firewall4 fstools grub2-bios-setup \
         kmod-button-hotplug kmod-fs-f2fs kmod-igbvf kmod-igc kmod-ixgbevf kmod-nf-nathelper kmod-nf-nathelper-extra kmod-nft-offload kmod-usb-hid kmod-usb-net \
         luci-app-package-manager luci-compat luci-light mkf2fs mtd netifd nftables odhcp6c odhcpd-ipv6only opkg partx-utils ppp ppp-mod-pppoe procd-ujail uci uclient-fetch urandom-seed urngd \
@@ -102,18 +89,33 @@ jobs:
         luci-app-openclash \
         -kmod-e1000e -kmod-e1000 -kmod-igb -kmod-i40e -kmod-ixgbe -dnsmasq"
 
-        # --- 生成固件 ---
+        # --- 3. 生成固件 ---
         make image PROFILE="generic" PACKAGES="$PACKAGES" PACKAGES_DIR="packages/custom" FILES="files"
 
-    - name: Organize files
+    - name: Extract Only EFI Image
       run: |
         cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        
+        # 创建一个输出文件夹
+        mkdir -p final_output
+        
+        # --- 核心步骤：只移动 Combined-EFI 镜像 ---
+        # 查找包含 combined-efi.img.gz 的文件并移动到输出目录
+        mv *combined-efi.img.gz final_output/ 2>/dev/null || true
+        
+        # 检查是否成功
+        if [ -z "$(ls -A final_output)" ]; then
+           echo "❌ 错误：未找到 EFI 镜像！可能是编译失败或文件名变更。"
+           ls -lh  # 列出当前文件以便调试
+           exit 1
+        fi
+        
+        echo "✅ 成功提取 EFI 镜像"
+        echo "FIRMWARE=$PWD/final_output" >> $GITHUB_ENV
 
     - name: Upload firmware
       uses: actions/upload-artifact@v4
       with:
-        name: ImmortalWrt_Final_x86_64
+        name: ImmortalWrt_EFI_Only
         path: ${{ env.FIRMWARE }}
         compression-level: 0
