@@ -1,10 +1,10 @@
-name: ⚡️ 修复版 Image Builder (自动适配 zst/xz)
+name: 🟢 最终完美修复版 (Image Builder)
 
 on:
   workflow_dispatch:
     inputs:
       force_version:
-        description: '可选: 手动填入版本号 (如 24.10.0-rc3)。留空则自动获取最新稳定版'
+        description: '可选: 手动填入版本号 (如 24.10.4)。留空则自动获取最新稳定版'
         required: false
         default: ''
 
@@ -22,7 +22,8 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip python3 zstd
+        # 核心修复: 添加 qemu-utils 解决 qcow2 生成失败的问题
+        sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip python3 zstd qemu-utils
 
     - name: Detect Version & Download
       run: |
@@ -81,19 +82,13 @@ jobs:
       run: |
         cd openwrt
         
-        # --- 修复核心：使用 uci-defaults 修改 IP ---
-        # Image Builder 不能直接编辑 config_generate，我们创建一个启动脚本
-        # 路由器第一次开机时会自动执行这个脚本修改 IP
-        
+        # --- 核心: 使用 uci-defaults 修改 IP (解决 sed 报错) ---
         mkdir -p files/etc/uci-defaults
-        
         cat << EOF > files/etc/uci-defaults/99-custom-ip
         uci set network.lan.ipaddr='10.0.0.1'
         uci commit network
         exit 0
         EOF
-        
-        # 赋予脚本执行权限
         chmod +x files/etc/uci-defaults/99-custom-ip
 
         # --- 软件包配置 ---
@@ -108,7 +103,6 @@ jobs:
         -kmod-e1000e -kmod-e1000 -kmod-igb -kmod-i40e -kmod-ixgbe -dnsmasq"
 
         # --- 生成固件 ---
-        # 关键参数: FILES="files" 用于将我们需要修改 IP 的脚本植入固件
         make image PROFILE="generic" PACKAGES="$PACKAGES" PACKAGES_DIR="packages/custom" FILES="files"
 
     - name: Organize files
@@ -120,6 +114,6 @@ jobs:
     - name: Upload firmware
       uses: actions/upload-artifact@v4
       with:
-        name: ImmortalWrt_Fix_x86_64
+        name: ImmortalWrt_Final_x86_64
         path: ${{ env.FIRMWARE }}
         compression-level: 0
