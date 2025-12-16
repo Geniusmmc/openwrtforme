@@ -1,13 +1,12 @@
-name: Fast Build (Image Builder) - x86_64
+name: ⚡️ 全能版 Image Builder (自动适配 zst/xz)
 
 on:
   workflow_dispatch:
     inputs:
-      # 允许手动输入版本，默认为最稳定的 23.05.4
-      ib_url:
-        description: 'Image Builder URL'
-        required: true
-        default: 'https://downloads.immortalwrt.org/releases/23.05.4/targets/x86/64/immortalwrt-imagebuilder-23.05.4-x86-64.Linux-x86_64.tar.xz'
+      force_version:
+        description: '填入版本号 (例如 24.10.4)。留空则自动获取 GitHub 最新稳定版'
+        required: false
+        default: ''
 
 env:
   TZ: Asia/Shanghai
@@ -20,21 +19,50 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install Dependencies (Support .zst & xz)
+    - name: Install Dependencies
       run: |
         sudo apt-get update
-        # 安装 zstd 以支持新版固件的 .tar.zst 格式
+        # 必须安装 zstd 以解压新版固件
         sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip python3 zstd
 
-    - name: Download & Extract Image Builder
+    - name: Detect Version & Download
       run: |
-        echo "Downloading Image Builder..."
-        wget -O ib.archive "${{ github.event.inputs.ib_url }}"
+        # 1. 确定版本号
+        if [ -n "${{ github.event.inputs.force_version }}" ]; then
+          VERSION="${{ github.event.inputs.force_version }}"
+          echo "👉 使用手动指定的版本: $VERSION"
+        else
+          # 获取最新 Release Tag
+          LATEST_TAG=$(curl -sL https://api.github.com/repos/immortalwrt/immortalwrt/releases/latest | grep "tag_name" | cut -d '"' -f 4)
+          VERSION=${LATEST_TAG#v}
+          echo "🔎 自动检测到 GitHub 最新发布版: $VERSION"
+        fi
+
+        # 2. 构造基础 URL (x86/64)
+        BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/x86/64"
         
+        # 3. 尝试下载逻辑 (优先尝试 .zst，失败则尝试 .xz)
+        FILE_ZST="immortalwrt-imagebuilder-${VERSION}-x86-64.Linux-x86_64.tar.zst"
+        FILE_XZ="immortalwrt-imagebuilder-${VERSION}-x86-64.Linux-x86_64.tar.xz"
+        
+        echo "⬇️ 尝试下载新版格式 (.zst)..."
+        if wget -O ib.archive "$BASE_URL/$FILE_ZST"; then
+          echo "✅ 下载成功 (.zst)"
+          EXT="zst"
+        else
+          echo "⚠️ .zst 下载失败，尝试旧版格式 (.xz)..."
+          if wget -O ib.archive "$BASE_URL/$FILE_XZ"; then
+            echo "✅ 下载成功 (.xz)"
+            EXT="xz"
+          else
+            echo "❌ 下载失败！请检查版本号 [$VERSION] 是否存在。"
+            exit 1
+          fi
+        fi
+
+        # 4. 解压
         mkdir -p openwrt
-        
-        # 自动识别压缩格式并解压 (.xz 或 .zst)
-        if [[ "${{ github.event.inputs.ib_url }}" == *".zst" ]]; then
+        if [ "$EXT" == "zst" ]; then
           tar -I zstd -xf ib.archive -C openwrt --strip-components=1
         else
           tar -xf ib.archive -C openwrt --strip-components=1
@@ -43,31 +71,26 @@ jobs:
     - name: Add OpenClash Source
       run: |
         cd openwrt
-        # 创建本地包目录
         mkdir -p packages/custom
         cd packages/custom
         
-        # 直接下载 OpenClash IPK (最新版 v0.46.003-beta)
+        # 下载 OpenClash IPK (最新 Beta)
         wget https://github.com/vernesong/OpenClash/releases/download/v0.46.003-beta/luci-app-openclash_0.46.003-beta_all.ipk
         
-        # 允许安装未签名的本地包
         cd ../..
+        # 允许安装本地包
         sed -i 's/option check_signature/# option check_signature/g' repositories.conf
-        
-        # 添加第三方源依赖 (如果需要)
-        # echo "src/gz openclash_core https://raw.githubusercontent.com/vernesong/OpenClash/master/core-release" >> repositories.conf
 
     - name: Configure IP & Packages
       run: |
         cd openwrt
         
-        # --- 1. 修改默认 IP 为 10.0.0.1 ---
-        # 查找并修改 config_generate 文件
+        # --- 1. 修改 IP 为 10.0.0.1 ---
         sed -i 's/192.168.[0-9]*.[0-9]*/10.0.0.1/g' package/base-files/files/bin/config_generate
         
         # --- 2. 软件包配置 ---
-        # 保留了您的所有需求：i915核显, igc 2.5G网卡, OpenClash
-        # 删除了：旧的千兆驱动 (e1000/e1000e/igb) 和旧的万兆驱动 (i40e/ixgbe)
+        # 包含: i915(核显), igc(2.5G网卡), OpenClash
+        # 排除: 旧网卡驱动, dnsmasq(防止冲突)
         
         PACKAGES="base-files block-mount ca-bundle default-settings-chn dnsmasq-full dropbear fdisk firewall4 fstools grub2-bios-setup \
         kmod-button-hotplug kmod-fs-f2fs kmod-igbvf kmod-igc kmod-ixgbevf kmod-nf-nathelper kmod-nf-nathelper-extra kmod-nft-offload kmod-usb-hid kmod-usb-net \
@@ -88,6 +111,6 @@ jobs:
     - name: Upload firmware
       uses: actions/upload-artifact@v4
       with:
-        name: ImmortalWrt_FastBuild_x86
+        name: ImmortalWrt_Universal_x86_64
         path: ${{ env.FIRMWARE }}
         compression-level: 0
