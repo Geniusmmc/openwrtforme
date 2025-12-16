@@ -1,14 +1,15 @@
-name: Fast Build (Image Builder 24.10)
+name: Fast Build (Image Builder) - x86_64
 
 on:
   workflow_dispatch:
+    inputs:
+      # 允许手动输入版本，默认为最稳定的 23.05.4
+      ib_url:
+        description: 'Image Builder URL'
+        required: true
+        default: 'https://downloads.immortalwrt.org/releases/23.05.4/targets/x86/64/immortalwrt-imagebuilder-23.05.4-x86-64.Linux-x86_64.tar.xz'
 
 env:
-  # 自动构建正确的 x86/64 下载链接
-  # 假设路径结构遵循 ImmortalWrt 惯例: releases/24.10.4/targets/x86/64/...
-  IB_VERSION: "24.10.4"
-  IB_ARCH: "x86-64"
-  IB_FILENAME: "immortalwrt-imagebuilder-24.10.4-x86-64.Linux-x86_64.tar.zst"
   TZ: Asia/Shanghai
 
 jobs:
@@ -19,54 +20,56 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Prepare Environment & Download IB
+    - name: Install Dependencies (Support .zst & xz)
       run: |
-        # 安装 zstd 以解压 .zst 文件
         sudo apt-get update
+        # 安装 zstd 以支持新版固件的 .tar.zst 格式
         sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip python3 zstd
-        
-        # 拼接下载 URL
-        IB_URL="https://downloads.immortalwrt.org/releases/${IB_VERSION}/targets/x86/64/${IB_FILENAME}"
-        
-        echo "Downloading Image Builder from: $IB_URL"
-        wget -O ib.tar.zst "$IB_URL"
+
+    - name: Download & Extract Image Builder
+      run: |
+        echo "Downloading Image Builder..."
+        wget -O ib.archive "${{ github.event.inputs.ib_url }}"
         
         mkdir -p openwrt
-        # 使用 zstd 解压
-        tar -I zstd -xf ib.tar.zst -C openwrt --strip-components=1
+        
+        # 自动识别压缩格式并解压 (.xz 或 .zst)
+        if [[ "${{ github.event.inputs.ib_url }}" == *".zst" ]]; then
+          tar -I zstd -xf ib.archive -C openwrt --strip-components=1
+        else
+          tar -xf ib.archive -C openwrt --strip-components=1
+        fi
 
     - name: Add OpenClash Source
       run: |
         cd openwrt
-        # 尝试使用 ImmortalWrt 24.x 自带的软件源配置
-        # 如果需要手动添加第三方源:
-        echo "src/gz openclash https://raw.githubusercontent.com/vernesong/OpenClash/master/core-release" >> repositories.conf
-        
-        # 允许第三方签名（防止报错）
-        sed -i 's/option check_signature/# option check_signature/g' repositories.conf
-        
-        # 准备本地包目录
+        # 创建本地包目录
         mkdir -p packages/custom
         cd packages/custom
         
-        # 下载 OpenClash IPK (使用 v0.46.003-beta 或更新版本)
+        # 直接下载 OpenClash IPK (最新版 v0.46.003-beta)
         wget https://github.com/vernesong/OpenClash/releases/download/v0.46.003-beta/luci-app-openclash_0.46.003-beta_all.ipk
         
+        # 允许安装未签名的本地包
+        cd ../..
+        sed -i 's/option check_signature/# option check_signature/g' repositories.conf
+        
+        # 添加第三方源依赖 (如果需要)
+        # echo "src/gz openclash_core https://raw.githubusercontent.com/vernesong/OpenClash/master/core-release" >> repositories.conf
+
     - name: Configure IP & Packages
       run: |
         cd openwrt
         
         # --- 1. 修改默认 IP 为 10.0.0.1 ---
-        # 24.10 版本路径可能会有微调，使用 find 确保找到 config_generate
-        CONF_GEN=$(find . -name config_generate | grep base-files)
-        sed -i 's/192.168.[0-9]*.[0-9]*/10.0.0.1/g' $CONF_GEN
+        # 查找并修改 config_generate 文件
+        sed -i 's/192.168.[0-9]*.[0-9]*/10.0.0.1/g' package/base-files/files/bin/config_generate
         
-        # --- 2. 定义软件包列表 ---
-        # 注意：移除了 kmod-e1000/e1000e/igb 等旧驱动，保留 igc (2.5G)
-        # 移除了 grub2-bios-setup (24.x 版本通常默认处理 EFI/Legacy 引导，如果报错可尝试移除该项)
-        # 如果 24.10 默认使用 nftables，firewall4 已经是标配
+        # --- 2. 软件包配置 ---
+        # 保留了您的所有需求：i915核显, igc 2.5G网卡, OpenClash
+        # 删除了：旧的千兆驱动 (e1000/e1000e/igb) 和旧的万兆驱动 (i40e/ixgbe)
         
-        PACKAGES="base-files block-mount ca-bundle default-settings-chn dnsmasq-full dropbear fdisk firewall4 fstools \
+        PACKAGES="base-files block-mount ca-bundle default-settings-chn dnsmasq-full dropbear fdisk firewall4 fstools grub2-bios-setup \
         kmod-button-hotplug kmod-fs-f2fs kmod-igbvf kmod-igc kmod-ixgbevf kmod-nf-nathelper kmod-nf-nathelper-extra kmod-nft-offload kmod-usb-hid kmod-usb-net \
         luci-app-package-manager luci-compat luci-light mkf2fs mtd netifd nftables odhcp6c odhcpd-ipv6only opkg partx-utils ppp ppp-mod-pppoe procd-ujail uci uclient-fetch urandom-seed urngd \
         kmod-dwmac-intel kmod-fs-vfat kmod-drm-i915 i915-firmware-dmc \
@@ -74,7 +77,6 @@ jobs:
         -kmod-e1000e -kmod-e1000 -kmod-igb -kmod-i40e -kmod-ixgbe -dnsmasq"
 
         # --- 3. 生成固件 ---
-        # 24.10 可能使用新的 Profile 名称，通常 x86 依然是 "generic"
         make image PROFILE="generic" PACKAGES="$PACKAGES" PACKAGES_DIR="packages/custom" FILES="files"
 
     - name: Organize files
@@ -86,6 +88,6 @@ jobs:
     - name: Upload firmware
       uses: actions/upload-artifact@v4
       with:
-        name: ImmortalWrt_24.10_x86
+        name: ImmortalWrt_FastBuild_x86
         path: ${{ env.FIRMWARE }}
         compression-level: 0
